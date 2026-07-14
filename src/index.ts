@@ -2,6 +2,7 @@ import express, { Request, Response } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { MongoClient, ObjectId, ServerApiVersion } from "mongodb";
+import { createRemoteJWKSet, jwtVerify } from "jose-cjs";
 
 dotenv.config();
 
@@ -24,7 +25,7 @@ const client = new MongoClient(uri, {
   },
 });
 
-// ডকুমেন্টের আসল shape অনুযায়ী interface
+
 interface TurfDocument {
   title: string;
   location: string;
@@ -37,7 +38,6 @@ interface TurfDocument {
   status: "pending" | "approved" | "rejected";
 }
 
-// ✅ বুকিং ডকুমেন্টের জন্য নতুন ইন্টারফেস (টাইপ সেফটির জন্য)
 interface BookingDocument {
   turfId: string;
   turfName: string;
@@ -57,6 +57,34 @@ interface UserDocument {
   role?: "user" | "admin";
 }
 
+
+const JWKS = createRemoteJWKSet(new URL(`${process.env.CLIENT_URL}/api/auth/jwks`));
+
+const verifyToken = async(req: any, res: any, next: any)=>{
+  const authHeader = req.headers.authorization;
+  console.log(authHeader,"auth");
+  if(!authHeader || !authHeader.startsWith("Bearer")){
+    return  res.status(401).json({ message: "Unauthorized" });
+  }
+  const token = authHeader.split(" ")[1];
+  console.log(token,"token");
+  if(!token){
+    return  res.status(401).json({ message: "Unauthorized" });
+  }
+
+  try{
+
+    const {payload} = await jwtVerify(token, JWKS);
+    console.log(payload);
+
+    next()
+
+  }catch(error){
+    console.log(error);
+    return  res.status(401).json({ message: "Unauthorized" });
+  }
+}
+
 async function run() {
   try {
     await client.connect();
@@ -73,7 +101,7 @@ async function run() {
       return user?.role === "admin";
     }
 
-    app.post("/api/allTurfs", async (req: Request, res: Response) => {
+    app.post("/api/allTurfs", verifyToken, async (req: Request, res: Response) => {
       try {
         const newTurf = req.body;
 
@@ -100,7 +128,39 @@ async function run() {
 
     app.get("/api/allTurfs", async (req: Request, res: Response) => {
       try {
-        const turfs = await turfCollection.find({}).toArray();
+        const { search, sportType, maxPrice, sortBy } = req.query as {
+          search?: string;
+          sportType?: string;
+          maxPrice?: string;
+          sortBy?: string;
+        };
+
+        const filter: Record<string, unknown> = {};
+
+        if (search && search.trim() !== "") {
+          
+          filter.$or = [
+            { title: { $regex: search, $options: "i" } },
+            { location: { $regex: search, $options: "i" } },
+          ];
+        }
+
+        if (sportType && sportType !== "all") {
+          filter.sportType = sportType;
+        }
+
+        if (maxPrice) {
+          filter.price = { $lte: Number(maxPrice) };
+        }
+
+        let sort: Record<string, 1 | -1> = {};
+        if (sortBy === "priceLow") {
+          sort = { price: 1 };
+        } else if (sortBy === "priceHigh") {
+          sort = { price: -1 };
+        }
+
+        const turfs = await turfCollection.find(filter).sort(sort).toArray();
         res.json({ success: true, data: turfs });
       } catch (error) {
         res
@@ -191,7 +251,7 @@ async function run() {
       }
     });
 
-    app.patch("/api/ownerTurfs/:id", async (req: Request, res: Response) => {
+    app.patch("/api/ownerTurfs/:id",verifyToken, async (req: Request, res: Response) => {
       try {
         const id = req.params.id;
         const { userEmail, ...updatedData } = req.body;
@@ -247,7 +307,7 @@ async function run() {
       }
     });
 
-    // ✅ ফিক্সড স্কোপ: এই গেট রুটটিকে run() ট্রাই ব্লকের ভেতরে নিয়ে আসা হয়েছে
+    // ফিক্সড স্কোপ: এই গেট রুটটিকে run() ট্রাই ব্লকের ভেতরে নিয়ে আসা হয়েছে
     app.get("/api/my-bookings", async (req: Request, res: Response) => {
       try {
         const userEmail = req.query.email as string | undefined;
@@ -271,7 +331,7 @@ async function run() {
 
     // ADMIN
 
-    // ✅ নতুন: অ্যাডমিন — সব turf দেখা (pending/approved/rejected সব)
+    // নতুন: অ্যাডমিন — সব turf দেখা (pending/approved/rejected সব)
     app.get("/api/admin/turfs", async (req: Request, res: Response) => {
       try {
         const email = req.query.email as string | undefined;
@@ -291,24 +351,22 @@ async function run() {
       }
     });
 
-    // ✅ নতুন: অ্যাডমিন — turf approve/reject করা
+    // নতুন: অ্যাডমিন — turf approve/reject করা
     app.patch(
       "/api/admin/turfs/:id/status",
-      async (req: Request, res: Response) => {
+      async (req: Request<{ id: string }>, res: Response) => {
         try {
           const id = req.params.id;
           const { email, status } = req.body as {
             email?: string;
             status?: string;
           };
-
           if (!(await isAdmin(email))) {
             res
               .status(403)
               .json({ success: false, message: "Admin access required" });
             return;
           }
-
           if (
             !ObjectId.isValid(id) ||
             (status !== "approved" && status !== "rejected")
@@ -338,7 +396,7 @@ async function run() {
       },
     );
 
-    // ✅ নতুন: অ্যাডমিন — সব ইউজার দেখা
+    //  নতুন: অ্যাডমিন — সব ইউজার দেখা
     app.get("/api/admin/users", async (req: Request, res: Response) => {
       try {
         const email = req.query.email as string | undefined;
@@ -348,7 +406,6 @@ async function run() {
             .json({ success: false, message: "Admin access required" });
           return;
         }
-
         const users = await userCollection.find({}).toArray();
         res.json({ success: true, data: users });
       } catch (error) {
@@ -360,7 +417,7 @@ async function run() {
 
     app.patch(
       "/api/admin/users/:id/role",
-      async (req: Request, res: Response) => {
+      async (req: Request<{ id: string }>, res: Response) => {
         try {
           const id = req.params.id;
           const { email, role } = req.body as { email?: string; role?: string };
@@ -383,10 +440,8 @@ async function run() {
               .json({ success: false, message: "Invalid user ID format" });
             return;
           }
-
-          // ✅ ফিক্স: string-কে ObjectId তে convert করে match করা হচ্ছে
           const result = await userCollection.updateOne(
-            { _id: new ObjectId(id) as any }, // Better Auth এর UserDocument টাইপে _id: string বলা আছে, তাই runtime এ ObjectId হলেও TS কে "as any" দিয়ে জানাতে হচ্ছে
+            { _id: new ObjectId(id) as any },
             { $set: { role } },
           );
 
